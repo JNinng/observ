@@ -3,7 +3,7 @@ module github.com/jninng/observ/adapters/prom
 go 1.21
 
 require (
-	github.com/jninng/observ v0.0.0
+	github.com/jninng/observ v0.1.0
 	github.com/prometheus/client_golang v1.19.1
 	github.com/prometheus/client_model v0.5.0
 )
@@ -16,5 +16,3 @@ require (
 	golang.org/x/sys v0.17.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
-
-replace github.com/jninng/observ => ../.. // 发布（打 tag）前移除，改用正式版本号
