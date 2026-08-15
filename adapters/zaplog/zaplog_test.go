@@ -121,6 +121,45 @@ func TestZapLevelMapping(t *testing.T) {
 	}
 }
 
+// stringValuer 验证 slog.LogValuer 在编码前被解析（对齐 slog handler 语义）。
+type stringValuer struct{}
+
+func (stringValuer) LogValue() slog.Value { return slog.StringValue("resolved") }
+
+func TestZapLogValuerResolved(t *testing.T) {
+	core := &recCore{min: zapcore.DebugLevel}
+	l := zaplog.New(zap.New(core))
+	l.Log(slog.LevelInfo, "m", slog.Any("v", stringValuer{}))
+	fs := core.fields[len(core.fields)-1]
+	if len(fs) != 1 {
+		t.Fatalf("fields = %d, want 1", len(fs))
+	}
+	if fs[0].Type != zapcore.StringType || fs[0].String != "resolved" {
+		t.Fatalf("LogValuer field = %+v, want string \"resolved\"", fs[0])
+	}
+}
+
+func TestZapGroupFlattening(t *testing.T) {
+	core := &recCore{min: zapcore.DebugLevel}
+	l := zaplog.New(zap.New(core))
+	l.Log(slog.LevelInfo, "m",
+		slog.String("top", "1"),
+		slog.Group("", slog.String("inlined", "2")),                    // 顶层空名组：内联
+		slog.Group("http", slog.Group("", slog.String("nested", "3"))), // 嵌套空名组：沿用父前缀
+		slog.Group("rpc", slog.String("method", "call")),               // 常规嵌套组
+	)
+	fs := core.fields[len(core.fields)-1]
+	want := []string{"top", "inlined", "http.nested", "rpc.method"}
+	if len(fs) != len(want) {
+		t.Fatalf("fields = %d, want %d (%+v)", len(fs), len(want), fs)
+	}
+	for i, k := range want {
+		if fs[i].Key != k {
+			t.Fatalf("field[%d].Key = %q, want %q", i, fs[i].Key, k)
+		}
+	}
+}
+
 func TestZapAttrEncoding(t *testing.T) {
 	core := &recCore{min: zapcore.DebugLevel}
 	l := zaplog.New(zap.New(core))

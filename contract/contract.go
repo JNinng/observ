@@ -76,7 +76,10 @@ func RunMeterContract(t *testing.T, new func() observ.Meter) {
 					t.Fatal("重复 New* 结局必须一致（先正常后 panic）")
 				}
 				outcome = 1
-			} else if val != nil {
+			} else {
+				if val == nil {
+					t.Fatal("未 panic 时 New* 必须返回非 nil 产物")
+				}
 				if outcome == 1 {
 					t.Fatal("重复 New* 结局必须一致（先 panic 后正常）")
 				}

@@ -9,7 +9,8 @@
 //	中间自定义级别就近向下（更严重）取整。
 //
 // 属性编码：slog.Attr 逐个显式转 zap Field，键名原样透传；
-// 除 KindAny 兜底外无反射；组属性以点号前缀展平。
+// LogValuer 在编码前解析（对齐 slog handler 语义）；除 KindAny
+// 兜底外无反射；组属性以点号前缀展平，空名组内联。
 package zaplog
 
 import (
@@ -57,6 +58,9 @@ func (l logger) Log(level slog.Level, msg string, attrs ...slog.Attr) {
 }
 
 func appendAttr(fields []zap.Field, a slog.Attr, prefix string) []zap.Field {
+	// 对齐 slog handler 语义：格式化前解析 LogValuer（解析可能改变
+	// Kind，包括解析为组值）。
+	a.Value = a.Value.Resolve()
 	key := a.Key
 	if prefix != "" {
 		key = prefix + "." + key
@@ -77,8 +81,14 @@ func appendAttr(fields []zap.Field, a slog.Attr, prefix string) []zap.Field {
 	case slog.KindTime:
 		return append(fields, zap.Time(key, a.Value.Time()))
 	case slog.KindGroup:
+		// 空名组内联（对齐 slog）：子属性沿用父前缀，避免产生
+		// "http..key" 双点号键。
+		child := key
+		if a.Key == "" {
+			child = prefix
+		}
 		for _, ga := range a.Value.Group() {
-			fields = appendAttr(fields, ga, key)
+			fields = appendAttr(fields, ga, child)
 		}
 		return fields
 	default: // 含 KindAny：反射兜底

@@ -4,8 +4,6 @@ package main
 
 import (
 	"log/slog"
-	"os"
-	"time"
 
 	"github.com/jninng/observ"
 	"github.com/jninng/observ/adapters/zaplog"
@@ -33,7 +31,9 @@ func (s *service) run(runID string) {
 	s.logger.Log(slog.LevelWarn, "task retried",
 		slog.String(observ.AttrRunID, runID),
 		slog.Int("attempt", 2),
-		slog.Duration(observ.AttrDurationSeconds, 300*time.Millisecond))
+		// _seconds 属性统一用 Float64 秒：slog.Duration 的渲染格式随
+		// handler 而变（300ms/300000000/0.3），会破坏跨库聚合口径。
+		slog.Float64(observ.AttrDurationSeconds, 0.3))
 
 	s.logger.Log(slog.LevelError, "task failed",
 		slog.String(observ.AttrRunID, runID),
@@ -66,5 +66,6 @@ func main() {
 	_ = observ.SetDefaultLogger(nil)
 	newService().run("run-43")
 
-	os.Exit(0)
+	// main 正常返回以执行 defer zl.Sync()（os.Exit 会跳过 defer，
+	// 有缓冲 core 时会丢日志）。
 }

@@ -302,7 +302,9 @@ func New(zl *zap.Logger) observ.Logger
 - **级别映射**：slog 四级与 zapcore 四级一一对应；介于两级间的
   自定义级别就近向下（更严重）取整。
 - **属性编码**：`slog.Attr` 逐个显式转 zap Field；键名按 4.3 的
-  snake_case 原样透传；除 `KindAny` 兜底外无反射。
+  snake_case 原样透传；`LogValuer` 在编码前解析（对齐 slog handler
+  语义）；组属性以点号前缀展平，空名组内联；除 `KindAny` 兜底外
+  无反射。
 - **存在理由**：zap 官方桥 `go.uber.org/zap/exp/zapslog` 位于实验性
   `exp/` 目录、无 API 稳定承诺，且方向是 slog.Handler 适配；zaplog
   直连 observ.Logger，由本仓库锁定语义、独立打 tag。
