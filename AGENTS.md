@@ -21,7 +21,7 @@ cd adapters/prom && go test ./...
 cd adapters/zaplog && go test ./...
 ```
 
-多 module 通过根目录 `go.work` 联编（`go 1.26.2` 工具链，各 module 最低 `go 1.21`）。
+多 module 不使用 `go.work` 联编，各 module 独立解析依赖（最低 `go 1.21`）；适配器依赖已发布的 observ 版本 tag，改根模块 API 后须先发新 tag 再 bump 适配器依赖。
 
 ## 依赖规则（硬约束）
 

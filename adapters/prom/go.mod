@@ -3,7 +3,7 @@ module github.com/jninng/observ/adapters/prom
 go 1.21
 
 require (
-	github.com/jninng/observ v0.1.0
+	github.com/jninng/observ v0.1.1
 	github.com/prometheus/client_golang v1.19.1
 	github.com/prometheus/client_model v0.5.0
 )

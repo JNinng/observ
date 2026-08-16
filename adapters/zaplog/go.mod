@@ -3,7 +3,7 @@ module github.com/jninng/observ/adapters/zaplog
 go 1.21
 
 require (
-	github.com/jninng/observ v0.1.0
+	github.com/jninng/observ v0.1.1
 	go.uber.org/zap v1.27.0
 )
 
