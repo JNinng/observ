@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/jninng/observ"
@@ -20,28 +21,28 @@ func newService() *service {
 	return &service{logger: observ.DefaultLogger()}
 }
 
-func (s *service) run(runID string) {
+func (s *service) run(ctx context.Context, runID string) {
 	// 属性键复用 attr.go 约定的统一命名，保证跨库聚合口径一致。
-	if !s.logger.Enabled(slog.LevelInfo) {
+	if !s.logger.Enabled(ctx, slog.LevelInfo) {
 		return
 	}
-	s.logger.Log(slog.LevelInfo, "service run started",
+	s.logger.Log(ctx, slog.LevelInfo, "service run started",
 		slog.String(observ.AttrRunID, runID))
 
-	s.logger.Log(slog.LevelWarn, "task retried",
+	s.logger.Log(ctx, slog.LevelWarn, "task retried",
 		slog.String(observ.AttrRunID, runID),
 		slog.Int("attempt", 2),
 		// _seconds 属性统一用 Float64 秒：slog.Duration 的渲染格式随
 		// handler 而变（300ms/300000000/0.3），会破坏跨库聚合口径。
 		slog.Float64(observ.AttrDurationSeconds, 0.3))
 
-	s.logger.Log(slog.LevelError, "task failed",
+	s.logger.Log(ctx, slog.LevelError, "task failed",
 		slog.String(observ.AttrRunID, runID),
 		slog.String(observ.AttrStatus, "failed"),
 		slog.String(observ.AttrErrorType, "timeout"))
 
 	// 组属性会被以点号前缀展平（如 http.method）。
-	s.logger.Log(slog.LevelInfo, "request done",
+	s.logger.Log(ctx, slog.LevelInfo, "request done",
 		slog.Group("http",
 			slog.String("method", "GET"),
 			slog.Int("status_code", 200),
@@ -60,11 +61,11 @@ func main() {
 	old := observ.SetDefaultLogger(zaplog.New(zl))
 	_ = old
 
-	newService().run("run-42")
+	newService().run(context.Background(), "run-42")
 
 	// 未接入任何实现时保持零输出、零开销：
 	_ = observ.SetDefaultLogger(nil)
-	newService().run("run-43")
+	newService().run(context.Background(), "run-43")
 
 	// main 正常返回以执行 defer zl.Sync()（os.Exit 会跳过 defer，
 	// 有缓冲 core 时会丢日志）。

@@ -1,6 +1,7 @@
 package zaplog_test
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"sync"
@@ -114,7 +115,7 @@ func TestZapLevelMapping(t *testing.T) {
 		{slog.LevelInfo + 2, zapcore.WarnLevel},
 	}
 	for _, tc := range cases {
-		l.Log(tc.in, "m")
+		l.Log(context.Background(), tc.in, "m")
 		if got := core.levels[len(core.levels)-1]; got != tc.want {
 			t.Fatalf("level %v mapped to %v, want %v", tc.in, got, tc.want)
 		}
@@ -129,7 +130,7 @@ func (stringValuer) LogValue() slog.Value { return slog.StringValue("resolved") 
 func TestZapLogValuerResolved(t *testing.T) {
 	core := &recCore{min: zapcore.DebugLevel}
 	l := zaplog.New(zap.New(core))
-	l.Log(slog.LevelInfo, "m", slog.Any("v", stringValuer{}))
+	l.Log(context.Background(), slog.LevelInfo, "m", slog.Any("v", stringValuer{}))
 	fs := core.fields[len(core.fields)-1]
 	if len(fs) != 1 {
 		t.Fatalf("fields = %d, want 1", len(fs))
@@ -142,7 +143,7 @@ func TestZapLogValuerResolved(t *testing.T) {
 func TestZapGroupFlattening(t *testing.T) {
 	core := &recCore{min: zapcore.DebugLevel}
 	l := zaplog.New(zap.New(core))
-	l.Log(slog.LevelInfo, "m",
+	l.Log(context.Background(), slog.LevelInfo, "m",
 		slog.String("top", "1"),
 		slog.Group("", slog.String("inlined", "2")),                    // 顶层空名组：内联
 		slog.Group("http", slog.Group("", slog.String("nested", "3"))), // 嵌套空名组：沿用父前缀
@@ -163,7 +164,7 @@ func TestZapGroupFlattening(t *testing.T) {
 func TestZapAttrEncoding(t *testing.T) {
 	core := &recCore{min: zapcore.DebugLevel}
 	l := zaplog.New(zap.New(core))
-	l.Log(slog.LevelInfo, "m",
+	l.Log(context.Background(), slog.LevelInfo, "m",
 		slog.String("run_id", "r1"),
 		slog.Int64("n", 3),
 		slog.Uint64("u", 7),

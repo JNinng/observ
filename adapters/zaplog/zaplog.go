@@ -8,12 +8,16 @@
 //	slog.LevelError ↔ zapcore.ErrorLevel
 //	中间自定义级别就近向下（更严重）取整。
 //
+// ctx 形参当前不参与 zap 编码（zap 无 ctx 面），仅为 observ.Logger
+// 接口对齐——span 等链路上下文由调用侧以显式字段传入。
+//
 // 属性编码：slog.Attr 逐个显式转 zap Field，键名原样透传；
 // LogValuer 在编码前解析（对齐 slog handler 语义）；除 KindAny
 // 兜底外无反射；组属性以点号前缀展平，空名组内联。
 package zaplog
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/jninng/observ"
@@ -39,11 +43,11 @@ func mapLevel(l slog.Level) zapcore.Level {
 	}
 }
 
-func (l logger) Enabled(level slog.Level) bool {
+func (l logger) Enabled(_ context.Context, level slog.Level) bool {
 	return l.zl.Core().Enabled(mapLevel(level))
 }
 
-func (l logger) Log(level slog.Level, msg string, attrs ...slog.Attr) {
+func (l logger) Log(_ context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
 	zl := mapLevel(level)
 	if !l.zl.Core().Enabled(zl) {
 		return
