@@ -31,7 +31,8 @@ go get github.com/jninng/observ/adapters/zaplog
 
 ```go
 logger := observ.NewSlogLogger(slog.Default())
-logger.Log(slog.LevelInfo, "service started", slog.String("component", "cache"))
+logger.Log(ctx, slog.LevelInfo, "service started", slog.String("component", "cache"))
+// ctx 逐字透传到 slog handler——链路上下文（如 trace span）由此流入
 
 // 或设置包级默认（原子替换，业务库构造期读取一次并固定）
 old := observ.SetDefaultLogger(logger)

@@ -24,7 +24,7 @@
 | 统一接入 | 各业务库统一引用 observ 根模块；用户侧只实现/选用一次桥接，全线复用                                                                     |
 | 事件形态 | 类型化 Observer 接口：每类事件一个固定结构体，方法 `OnXxx(XxxEvent)` 按值传递；无反射、无装箱、无变参切片                                        |
 | 指标接口 | 自定义小接口，签名对齐 prometheus/otel 子集；根模块零第三方依赖                                                                   |
-| 日志桥接 | 根模块定义 Logger 接口（2 方法，复用 stdlib `slog.Level`/`slog.Attr`），任意日志库直接实现即接入；slog 经根模块自带桥，zap 经 `adapters/zaplog` |
+| 日志桥接 | 根模块定义 Logger 接口（2 方法，均携带 ctx、复用 stdlib `slog.Level`/`slog.Attr`，签名与 `slog.Logger` 对齐），任意日志库直接实现即接入；slog 经根模块自带桥，zap 经 `adapters/zaplog` |
 | 默认回落 | 业务库选项未注入 Logger 时，构造期取 `observ.DefaultLogger()`（原子替换、初始 Noop、构造期快照），见 4.4                                  |
 | 仓库形态 | 单 Git 仓库多 Go module（根模块 + adapters/* 子模块）；根模块 `go.mod` 的 require 块必须为空                                     |
 | 最低版本 | 全线最低 Go 1.21（`log/slog` 进 stdlib 的版本），根模块与各适配器/业务库统一                                                       |
@@ -164,10 +164,12 @@ Meter 契约（硬性，按"可测语义 / 使用规范"两类约束，契约测
 ### 4.4 Logger（日志，对接任意日志库）
 
 ```go
-// Logger 是日志侧的统一落点：任意日志库实现两个方法即可接入，
+// Logger 是日志侧的统一落点：任意日志库实现两个方法即可接入。
+// 两方法均携带 ctx，签名与 slog.Logger 逐字对齐（v0.2.0 起的破坏性
+// 变更：链路上下文——如 trace span——随 ctx 流到实现侧）。
 type Logger interface {
-Enabled(level slog.Level) bool
-Log(level slog.Level, msg string, attrs ...slog.Attr)
+	Enabled(ctx context.Context, level slog.Level) bool
+	Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr)
 }
 
 var NoopLogger Logger = noopLogger{}   // Enabled 恒 false
@@ -398,19 +400,22 @@ label 变体 API 的具体形态在 prom 适配器实施时定稿，根模块接
 
 ## 8. 范围外（明确不做）
 
-- 不做 tracing（OpenTelemetry trace）——等有跨库链路追踪需求再议。
-  **已知负债（记录在案）**：当前事件方法无 ctx 参数、事件结构无
-  span 关联字段，`Logger.Log` 同样无 ctx（日志侧届时无法关联
-  span/从 ctx 取请求级信息）。演进路径：事件侧届时扩展事件签名
-  或引入带 ctx 的分发变体，可能构成各业务库的破坏性变更（走
-  major）；Logger 侧走可选扩展接口（如 `LogCtx(ctx, ...)`）+
-  分发点类型断言，与 5.1 Observer 模式一致，不破坏现有两方法
-  实现。此为接受的取舍。
+- 不做 tracing 聚合/导出（OpenTelemetry SDK 不进 observ——根模块零依赖
+  不变）。**日志侧的 span 关联已落地**：v0.2.0 起 `Logger.Log`/`Enabled`
+  携带 ctx（对齐 `slog.Logger` 签名，破坏性变更），消费侧经装饰层从
+  ctx 读 span 注入 `trace_id`/`span_id` 属性（如在 observ 边界包装
+  装饰 Logger——go_template 的 otelc 组件即此形态），observ 自身不
+  import otel。
+  **剩余负债（记录在案）**：事件方法（Observer）仍无 ctx 参数、事件
+  结构无 span 关联字段。演进路径：届时扩展事件签名或引入带 ctx 的
+  分发变体，可能构成各业务库的破坏性变更（走 major）。此为接受的取舍。
 - 根模块核心接口（`Meter`/`Counter`/`Gauge`/`Histogram`、
-  `Logger`）视为冻结：小版本演进一律走**可选能力接口/扩展接口**
-  ——先例为 §6 读回能力接口，分发模式同 §5.1 类型断言；仅当修改
-  方法签名或语义时走 major。不以未导出方法封锁接口——用户自行
-  实现 Meter/Logger 是受支持的用法（见 5.3 出口路径表）。
+  `Logger`）视为冻结：v1 前的小版本演进一律走**可选能力接口/扩展
+  接口**——先例为 §6 读回能力接口，分发模式同 §5.1 类型断言；修改
+  方法签名或语义属破坏性变更，v0.x 阶段以 minor 版本号表达（先例：
+  v0.2.0 为 Logger 两方法加 ctx），v1 起走 major。不以未导出方法
+  封锁接口——用户自行实现 Meter/Logger 是受支持的用法（见 5.3
+  出口路径表）。
 - 根模块不做任何日志格式化、聚合、导出实现。
 - 除 `DefaultLogger`（见 4.4，原子、初始 Noop、构造期快照）外，
   不引入任何包级可变全局状态；业务库同样不得自建包级可变全局。
