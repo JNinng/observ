@@ -1,6 +1,7 @@
 package contract_test
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"testing"
@@ -94,9 +95,9 @@ type fakeLogger struct {
 	offAt slog.Level // 该级别及以上 Enabled=false
 }
 
-func (l *fakeLogger) Enabled(level slog.Level) bool { return level < l.offAt }
-func (l *fakeLogger) Log(level slog.Level, msg string, attrs ...slog.Attr) {
-	if !l.Enabled(level) {
+func (l *fakeLogger) Enabled(_ context.Context, level slog.Level) bool { return level < l.offAt }
+func (l *fakeLogger) Log(_ context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
+	if !l.Enabled(context.Background(), level) {
 		return
 	}
 	l.mu.Lock()

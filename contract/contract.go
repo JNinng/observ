@@ -13,6 +13,7 @@
 package contract
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"testing"
@@ -153,16 +154,16 @@ func RunLoggerContract(t *testing.T, new func() observ.Logger) {
 
 	t.Run("NoPanicConcurrent", func(t *testing.T) {
 		l := new()
-		_ = l.Enabled(slog.LevelInfo)
+		_ = l.Enabled(context.Background(), slog.LevelInfo)
 		var wg sync.WaitGroup
 		for i := 0; i < 8; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for j := 0; j < 100; j++ {
-					l.Enabled(slog.LevelInfo)
-					l.Log(slog.LevelInfo, "m", slog.String("k", "v"))
-					l.Log(slog.LevelError, "e")
+					l.Enabled(context.Background(), slog.LevelInfo)
+					l.Log(context.Background(), slog.LevelInfo, "m", slog.String("k", "v"))
+					l.Log(context.Background(), slog.LevelError, "e")
 				}
 			}()
 		}
@@ -176,7 +177,7 @@ func RunLoggerContract(t *testing.T, new func() observ.Logger) {
 			t.Skip("无 Records 读回接口，深度档跳过")
 		}
 		attrs := []slog.Attr{slog.String("run_id", "r1"), slog.Int64("n", 3)}
-		l.Log(slog.LevelWarn, "hello", attrs...)
+		l.Log(context.Background(), slog.LevelWarn, "hello", attrs...)
 		recs := lr.Records()
 		if len(recs) != 1 {
 			t.Fatalf("records = %d, want 1", len(recs))
@@ -191,9 +192,9 @@ func RunLoggerContract(t *testing.T, new func() observ.Logger) {
 		}
 		// Enabled 门控下零输出。
 		for lvl := slog.LevelDebug; lvl <= slog.LevelError+8; lvl += 4 {
-			if !l.Enabled(lvl) {
+			if !l.Enabled(context.Background(), lvl) {
 				before := len(lr.Records())
-				l.Log(lvl, "gated")
+				l.Log(context.Background(), lvl, "gated")
 				if after := len(lr.Records()); after != before {
 					t.Fatalf("Log at disabled level %v produced output", lvl)
 				}

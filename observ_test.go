@@ -62,11 +62,13 @@ func TestNoopMeterConcurrent(t *testing.T) {
 }
 
 func TestNoopLogger(t *testing.T) {
-	if observ.NoopLogger.Enabled(slog.LevelError) {
+	if observ.NoopLogger.Enabled(context.Background(), slog.LevelError) {
 		t.Fatal("NoopLogger.Enabled must be false")
 	}
-	observ.NoopLogger.Log(slog.LevelError, "m", slog.String("k", "v")) // 不得 panic
-	n := testing.AllocsPerRun(100, func() { observ.NoopLogger.Log(slog.LevelInfo, "m") })
+	observ.NoopLogger.Log(context.Background(), slog.LevelError, "m", slog.String("k", "v")) // 不得 panic
+	n := testing.AllocsPerRun(100, func() {
+		observ.NoopLogger.Log(context.Background(), slog.LevelInfo, "m")
+	})
 	if n != 0 {
 		t.Fatalf("NoopLogger.Log no-attr allocs = %v, want 0", n)
 	}
@@ -113,20 +115,29 @@ func TestDefaultLoggerConcurrentSwap(t *testing.T) {
 func TestSlogLoggerBridge(t *testing.T) {
 	h := &recSlogHandler{}
 	sl := observ.NewSlogLogger(slog.New(h))
-	if !sl.Enabled(slog.LevelError) {
+	if !sl.Enabled(context.Background(), slog.LevelError) {
 		t.Fatal("slog bridge Enabled(Error) should be true for text-like handler")
 	}
-	sl.Log(slog.LevelWarn, "hello", slog.String("run_id", "r1"))
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "v1")
+	sl.Log(ctx, slog.LevelWarn, "hello", slog.String("run_id", "r1"))
 	if len(h.recs) != 1 || h.recs[0].Level != slog.LevelWarn || h.recs[0].Message != "hello" {
 		t.Fatalf("unexpected records: %+v", h.recs)
 	}
+	if got := h.ctxs[0].Value(ctxKey{}); got != "v1" {
+		t.Fatalf("slog bridge dropped caller ctx, got %v", got)
+	}
 }
 
-type recSlogHandler struct{ recs []slog.Record }
+type recSlogHandler struct {
+	recs []slog.Record
+	ctxs []context.Context
+}
 
 func (h *recSlogHandler) Enabled(ctx context.Context, l slog.Level) bool { return true }
 func (h *recSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 	h.recs = append(h.recs, r)
+	h.ctxs = append(h.ctxs, ctx)
 	return nil
 }
 func (h *recSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
