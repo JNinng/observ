@@ -6,9 +6,10 @@
 //     （不进 observ 根模块）。方法名 On<Event>，参数为按值传递的
 //     事件结构体；字段为值类型、string、error 或已存在且此后不可变
 //     的 slice；禁止 map/指针、禁止在分发点构造/拷贝容器。
-//  2. 注入用 option 模式：WithObserver(obs)/WithMeter(m) 默认 Noop；
-//     WithLogger(l) 未注入时构造期取 observ.DefaultLogger() 并固定
-//     （快照语义）。
+//  2. 注入用 option 模式：WithObserver(obs) 默认 Noop；
+//     WithMeter(m)/WithLogger(l) 未注入时构造期取
+//     observ.DefaultMeter()/observ.DefaultLogger() 并固定（快照语义，
+//     Meter 初始亦 Noop，未设置即零开销）。
 //  3. 回调 panic 必须被业务库 recover；回调在调用方 goroutine 同步
 //     执行，必须快速返回（微秒级）；业务库不提供异步分发。
 //  4. 接口演进走可选扩展接口（ObserverV2 嵌入 Observer）+ 分发点

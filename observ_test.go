@@ -74,6 +74,48 @@ func TestNoopLogger(t *testing.T) {
 	}
 }
 
+func TestDefaultMeterSemantics(t *testing.T) {
+	if observ.DefaultMeter() != observ.NoopMeter {
+		t.Fatal("DefaultMeter must start as NoopMeter")
+	}
+	m := wrapMeter{observ.NoopMeter}
+	old := observ.SetDefaultMeter(m)
+	if old != observ.NoopMeter {
+		t.Fatalf("SetDefaultMeter old = %v, want NoopMeter", old)
+	}
+	if observ.DefaultMeter() != m {
+		t.Fatal("DefaultMeter did not swap")
+	}
+	old2 := observ.SetDefaultMeter(nil)
+	if old2 != m || observ.DefaultMeter() != observ.NoopMeter {
+		t.Fatal("SetDefaultMeter(nil) must reset to NoopMeter")
+	}
+}
+
+// wrapMeter 以嵌入制造与 NoopMeter 相异的动态类型（方法全部可用），
+// 供默认值替换断言区分身份。
+type wrapMeter struct{ observ.Meter }
+
+func TestDefaultMeterConcurrentSwap(t *testing.T) {
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if m := observ.DefaultMeter(); m == nil {
+					t.Error("DefaultMeter returned nil")
+					return
+				}
+				observ.SetDefaultMeter(wrapMeter{observ.NoopMeter})
+			}
+		}()
+	}
+	wg.Wait()
+	// 恢复
+	observ.SetDefaultMeter(nil)
+}
+
 func TestDefaultLoggerSemantics(t *testing.T) {
 	if observ.DefaultLogger() != observ.NoopLogger {
 		t.Fatal("DefaultLogger must start as NoopLogger")

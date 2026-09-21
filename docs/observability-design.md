@@ -25,7 +25,7 @@
 | 事件形态 | 类型化 Observer 接口：每类事件一个固定结构体，方法 `OnXxx(XxxEvent)` 按值传递；无反射、无装箱、无变参切片                                        |
 | 指标接口 | 自定义小接口，签名对齐 prometheus/otel 子集；根模块零第三方依赖                                                                   |
 | 日志桥接 | 根模块定义 Logger 接口（2 方法，均携带 ctx、复用 stdlib `slog.Level`/`slog.Attr`，签名与 `slog.Logger` 对齐），任意日志库直接实现即接入；slog 经根模块自带桥，zap 经 `adapters/zaplog` |
-| 默认回落 | 业务库选项未注入 Logger 时，构造期取 `observ.DefaultLogger()`（原子替换、初始 Noop、构造期快照），见 4.4                                  |
+| 默认回落 | 业务库选项未注入 Logger / Meter 时，构造期取 `observ.DefaultLogger()` / `observ.DefaultMeter()`（原子替换、初始 Noop、构造期快照），见 4.4 / 4.2 |
 | 仓库形态 | 单 Git 仓库多 Go module（根模块 + adapters/* 子模块）；根模块 `go.mod` 的 require 块必须为空                                     |
 | 最低版本 | 全线最低 Go 1.21（`log/slog` 进 stdlib 的版本），根模块与各适配器/业务库统一                                                       |
 
@@ -101,10 +101,14 @@ type Histogram interface {
 Observe(v float64)
 }
 type Meter interface {
-NewCounter(name, help string) Counter
-NewGauge(name, help string) Gauge
-NewHistogram(name, help string, buckets []float64) Histogram
+	NewCounter(name, help string) Counter
+	NewGauge(name, help string) Gauge
+	NewHistogram(name, help string, buckets []float64) Histogram
 }
+
+// 包级默认 Meter：原子读写、永不返回 nil、初始为 NoopMeter
+func DefaultMeter() Meter
+func SetDefaultMeter(m Meter) (old Meter) // 传 nil 等价重置为 Noop
 ```
 
 - **无 label 参数**：带 label 的指标由 Meter 实现方在适配层组合
@@ -119,6 +123,16 @@ NewHistogram(name, help string, buckets []float64) Histogram
   值命中；用户传入自定义 noop 时不命中，走空方法体内联路径，
   开销可忽略。正确性不依赖门控命中，实现方不得以包装类型破坏
   该相等性。
+- **包级默认（DefaultMeter）**：与 `DefaultLogger` 对称（见 4.4）——用户
+  项目装一次指标出口（`SetDefaultMeter`），全线业务库构造期回落，无需
+  逐库穿线。经 `atomic.Pointer` 读写，永不返回 nil，初始为 NoopMeter
+  （不设置任何东西的用户保持零开销）；`SetDefaultMeter` 原子替换并返回
+  旧值（供测试恢复）。**构造期快照语义**：业务库在构造函数中读取一次
+  并固定，运行期替换仅影响之后构造的组件。与 Logger 的差异：`New*`
+  产物绑定构造时刻的 Meter——替换后已建仪表不迁移、不追溯（未设置期
+  构造的组件保持 Noop），故出口组件须先于业务组件装配。初始返回值即
+  `NoopMeter` 值，`m == observ.NoopMeter` 门控照常命中。业务库选项
+  未注入 Meter 时回落到它（见 5.1）。
 - 根模块不提供任何聚合/导出实现——导出由适配器与用户侧负责。
 
 Meter 契约（硬性，按"可测语义 / 使用规范"两类约束，契约测试
@@ -233,9 +247,10 @@ type NoopObserver struct{} // 空方法体，内联，~1-2ns/次
   string、error，或**已存在且此后不可变**的 slice（传递不逃逸即零
   分配）；禁止 map/指针，禁止在事件分发点构造/拷贝容器。批量类事件
   （如一批任务失败）允许携带不可变 slice 字段。
-- 注入用各库既有的 option 模式：`WithObserver(obs)` / `WithMeter(m)`
-  默认 Noop；`WithLogger(l)` 未注入时构造期取
-  `observ.DefaultLogger()` 并固定（快照语义，见 4.4）。
+- 注入用各库既有的 option 模式：`WithObserver(obs)` 默认 Noop；
+  `WithMeter(m)` / `WithLogger(l)` 未注入时构造期取
+  `observ.DefaultMeter()` / `observ.DefaultLogger()` 并固定
+  （快照语义，见 4.2 / 4.4；Meter 初始亦 Noop，未设置即零开销）。
 - 回调 panic 必须被业务库 recover，绝不影响主流程。事件均为低频，
   业务库在事件分发点用 `defer` + `recover` 兜底并降级为内部计数即可，
   不引入每次调用的闭包包装。
@@ -370,9 +385,9 @@ label 变体 API 的具体形态在 prom 适配器实施时定稿，根模块接
       修改调用方切片，观察结果与 Bounds 不受影响）、`Enabled`
       门控下零输出、级别透传与 attrs 内容。
       `New*` 调用时机与 NoopMeter 门控属使用规范，不可测（见 4.2）。
-      DefaultLogger 的原子替换、永不 nil、初始 Noop、构造期快照语义
-      在根模块测试中直接断言（`-race`，含 `SetDefaultLogger`
-      旧值恢复）。
+      DefaultLogger / DefaultMeter 的原子替换、永不 nil、初始 Noop、
+      构造期快照语义在根模块测试中直接断言（`-race`，含
+      `SetDefaultLogger` / `SetDefaultMeter` 旧值恢复）。
 - **适配器**：prom 复用根模块 `contract` 契约测试——适配层为产物
   包装读回接口，启用深度档 golden 断言——另加 registry 语义断言
   （指标名/类型/help）；zaplog 复用 `contract` 的 Logger 契约
@@ -417,5 +432,6 @@ label 变体 API 的具体形态在 prom 适配器实施时定稿，根模块接
   封锁接口——用户自行实现 Meter/Logger 是受支持的用法（见 5.3
   出口路径表）。
 - 根模块不做任何日志格式化、聚合、导出实现。
-- 除 `DefaultLogger`（见 4.4，原子、初始 Noop、构造期快照）外，
-  不引入任何包级可变全局状态；业务库同样不得自建包级可变全局。
+- 除 `DefaultLogger` / `DefaultMeter`（见 4.4 / 4.2，原子、初始 Noop、
+  构造期快照）外，不引入任何包级可变全局状态；业务库同样不得自建
+  包级可变全局。

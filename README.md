@@ -8,7 +8,7 @@
 - **日志桥接**：`Logger` 接口仅 2 个方法，任意日志库直接实现即接入；slog 经根模块自带桥，zap 经 `adapters/zaplog`。
 - **指标小接口**：`Meter` 签名对齐 prometheus/otel 子集，根模块不提供聚合/导出实现。
 - **契约测试**：`contract` 包提供 `RunMeterContract` / `RunLoggerContract`，适配器实现一套测试即可验证并发安全与语义。
-- **Noop 默认回落**：未注入选项时零输出、零开销。
+- **Noop 默认回落**：日志与指标均有包级默认（`DefaultLogger` / `DefaultMeter`，原子替换、初始 Noop、构造期快照），未注入选项时零输出、零开销。
 
 ## 安装
 
@@ -50,6 +50,10 @@ counter.Add(2.5)
 
 histogram := meter.NewHistogram("latency_seconds", "Request latency", []float64{0.5, 1, 2.5})
 histogram.Observe(0.42)
+
+// 或设置包级默认（原子替换，业务库构造期读取一次并固定）
+old := observ.SetDefaultMeter(meter)
+defer observ.SetDefaultMeter(old)
 ```
 
 ### 接入 Prometheus / zap
@@ -83,7 +87,7 @@ func TestLoggerContract(t *testing.T) {
 ## 业务库接入规范（摘要）
 
 1. **类型化 Observer**：每类事件一个固定结构体，方法 `OnXxx(XxxEvent)` 按值传递；无反射、无装箱、无变参切片。
-2. **option 模式注入**：`WithObserver(obs)`/`WithMeter(m)` 默认 Noop；`WithLogger(l)` 未注入时构造期取 `observ.DefaultLogger()` 并固定（快照语义）。
+2. **option 模式注入**：`WithObserver(obs)` 默认 Noop；`WithMeter(m)`/`WithLogger(l)` 未注入时构造期取 `observ.DefaultMeter()`/`observ.DefaultLogger()` 并固定（快照语义，Meter 初始亦 Noop）。
 3. **回调纪律**：回调在调用方 goroutine 同步执行，必须快速返回（微秒级）；panic 必须被业务库 recover。
 4. **接口演进**：走可选扩展接口（`ObserverV2` 嵌入 `Observer`）+ 分发点类型断言，非破坏性。
 5. **分层规则**：热路径只做指标埋点，日志仅用于低频生命周期事件。

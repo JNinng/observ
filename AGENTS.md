@@ -33,6 +33,7 @@ cd adapters/zaplog && go test ./...
 
 - 不自定义 Level 类型：日志级别直接复用 `slog.Level`/`slog.Attr`。
 - `DefaultLogger()` 为构造期快照语义：业务库构造函数读一次并固定；经 `atomic.Pointer` 原子替换，初始 Noop。
+- `DefaultMeter()` 同语义成对：原子替换、初始 Noop；差异是 `New*` 产物绑定构造时刻的 Meter，替换不追溯已建仪表（出口组件须先于业务组件装配）。
 - `NoopMeter` 是可比较零大小值类型，业务库用 `meter == observ.NoopMeter` 整体跳过埋点。
 - 指标命名：attr/指标名 snake_case，对齐 OTel 语义约定（见 `attr.go`）；核心包指标只有无 label 与枚举拆名两种形态。
 - 各业务库的 Observer 事件不进 observ 根模块（规范手册见 `doc.go` 与设计文档第 5 节）：事件按值传递、禁 map/指针、回调必须快速返回且由业务库 recover panic。
