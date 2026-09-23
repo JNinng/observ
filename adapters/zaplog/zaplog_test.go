@@ -215,3 +215,60 @@ func TestZapAttrEncoding(t *testing.T) {
 		t.Fatalf("duration = %d, want %d", fs[6].Integer, int64(1500*time.Millisecond))
 	}
 }
+
+// ─── NewDynamic / WithCtxAttrs ──────────────────────────────────────────
+
+// TestDynamicBridgeFollowsSwap：动态桥身份恒定，current 每次取当前实例
+// ——热更重建换新后自动跟随（observ 默认日志器只装一次的前提）。
+func TestDynamicBridgeFollowsSwap(t *testing.T) {
+	coreA, coreB := &recCore{min: zapcore.DebugLevel}, &recCore{min: zapcore.DebugLevel}
+	cur := zap.New(coreA)
+	l := zaplog.NewDynamic(func() *zap.Logger { return cur })
+
+	l.Log(context.Background(), slog.LevelInfo, "before")
+	cur = zap.New(coreB) // 模拟热更重建：桥不换、实例换
+	l.Log(context.Background(), slog.LevelInfo, "after")
+
+	if got := coreA.msgs; len(got) != 1 || got[0] != "before" {
+		t.Fatalf("core A records = %v, want [before]", got)
+	}
+	if got := coreB.msgs; len(got) != 1 || got[0] != "after" {
+		t.Fatalf("core B records = %v, want [after]", got)
+	}
+}
+
+// TestWithCtxAttrs：提取器属性追加在调用方属性之后；nil 返回零属性差异；
+// Enabled 路径不受影响。
+func TestWithCtxAttrs(t *testing.T) {
+	type traceKey struct{}
+	core := &recCore{min: zapcore.DebugLevel}
+	l := zaplog.NewDynamic(func() *zap.Logger { return zap.New(core) },
+		zaplog.WithCtxAttrs(func(ctx context.Context) []slog.Attr {
+			if ctx.Value(traceKey{}) == nil {
+				return nil
+			}
+			return []slog.Attr{slog.String("trace_id", "t-123")}
+		}))
+
+	ctx := context.WithValue(context.Background(), traceKey{}, true)
+	l.Log(ctx, slog.LevelInfo, "with trace", slog.String("app_name", "demo"))
+
+	recs := recLogger{Logger: l, core: core}.Records()
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	keys := map[string]bool{}
+	for _, a := range recs[0].Attrs {
+		keys[a.Key] = true
+	}
+	if !keys["trace_id"] || !keys["app_name"] {
+		t.Fatalf("attrs missing trace_id/app_name: %v", recs[0].Attrs)
+	}
+
+	// 无值 ctx：零属性差异
+	l.Log(context.Background(), slog.LevelInfo, "plain")
+	recs = recLogger{Logger: l, core: core}.Records()
+	if len(recs[1].Attrs) != 0 {
+		t.Fatalf("plain record attrs = %v, want empty", recs[1].Attrs)
+	}
+}

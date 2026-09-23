@@ -8,8 +8,14 @@
 //	slog.LevelError ↔ zapcore.ErrorLevel
 //	中间自定义级别就近向下（更严重）取整。
 //
-// ctx 形参当前不参与 zap 编码（zap 无 ctx 面），仅为 observ.Logger
-// 接口对齐——span 等链路上下文由调用侧以显式字段传入。
+// ctx 形参参与编码：WithCtxAttrs 注入提取器时，每次 Log 前从 ctx 提取
+// 属性（链路注入 trace_id/span_id/request_id 等）追加在调用方属性之后。
+// 注入做在适配层内部——调用面无需装饰层，zap caller 定位不受封装层数
+// 影响；提取器须并发安全且快速返回。
+//
+// 动态实例：NewDynamic 包装"取当前实例的函数"而非固定实例——热更重建
+// 换新后桥自动跟随，桥身份恒定、可安全长持（observ 默认日志器只装一次）。
+// caller skip 由实例侧烘焙（zap.AddCallerSkip），本适配层自身恒为一帧。
 //
 // 属性编码：slog.Attr 逐个显式转 zap Field，键名原样透传；
 // LogValuer 在编码前解析（对齐 slog handler 语义）；除 KindAny
@@ -25,10 +31,40 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// New 返回包装 zl 的 observ.Logger。
-func New(zl *zap.Logger) observ.Logger { return logger{zl} }
+// Option 构造选项。
+type Option func(*config)
 
-type logger struct{ zl *zap.Logger }
+type config struct {
+	ctxAttrs func(context.Context) []slog.Attr
+}
+
+// WithCtxAttrs 注入 ctx 属性提取器：每次 Log 前调用，返回的属性追加在
+// 调用方属性之后（zap 对同名键双写不覆盖——调用方显式传过的键应避免在
+// 提取器中重复产出）。nil 返回值合法（零属性差异）。
+func WithCtxAttrs(fn func(context.Context) []slog.Attr) Option {
+	return func(c *config) { c.ctxAttrs = fn }
+}
+
+// New 返回包装 zl 的 observ.Logger。
+func New(zl *zap.Logger, opts ...Option) observ.Logger {
+	return NewDynamic(func() *zap.Logger { return zl }, opts...)
+}
+
+// NewDynamic 返回包装动态实例的 observ.Logger：current 每次调用取当前
+// 生效实例（须并发安全；热更重建换新后自动跟随）。桥身份恒定——
+// 经 observ.SetDefaultLogger 安装后无需随实例重建重装。
+func NewDynamic(current func() *zap.Logger, opts ...Option) observ.Logger {
+	var c config
+	for _, o := range opts {
+		o(&c)
+	}
+	return logger{current: current, ctxAttrs: c.ctxAttrs}
+}
+
+type logger struct {
+	current  func() *zap.Logger
+	ctxAttrs func(context.Context) []slog.Attr
+}
 
 func mapLevel(l slog.Level) zapcore.Level {
 	switch {
@@ -43,20 +79,26 @@ func mapLevel(l slog.Level) zapcore.Level {
 	}
 }
 
-func (l logger) Enabled(_ context.Context, level slog.Level) bool {
-	return l.zl.Core().Enabled(mapLevel(level))
+func (l logger) Enabled(ctx context.Context, level slog.Level) bool {
+	return l.current().Core().Enabled(mapLevel(level))
 }
 
-func (l logger) Log(_ context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
+func (l logger) Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
 	zl := mapLevel(level)
-	if !l.zl.Core().Enabled(zl) {
+	inst := l.current()
+	if !inst.Core().Enabled(zl) {
 		return
 	}
 	fields := make([]zap.Field, 0, len(attrs))
 	for _, a := range attrs {
 		fields = appendAttr(fields, a, "")
 	}
-	if ce := l.zl.Check(zl, msg); ce != nil {
+	if l.ctxAttrs != nil {
+		for _, a := range l.ctxAttrs(ctx) {
+			fields = appendAttr(fields, a, "")
+		}
+	}
+	if ce := inst.Check(zl, msg); ce != nil {
 		ce.Write(fields...)
 	}
 }

@@ -65,7 +65,11 @@ import (
 )
 
 meter := prom.New(registry)             // 实现 observ.Meter
-logger := zaplog.New(zapLogger)         // 实现 observ.Logger
+logger := zaplog.New(zapLogger)         // 实现 observ.Logger（固定实例）
+// 动态实例（热更重建换新后桥自动跟随，可安全长持）+ ctx 属性注入
+// （链路字段在适配层内部追加，调用面无装饰层，caller 定位恒定）：
+// current 须并发安全地返回当前生效实例，如读热更状态机的原子指针。
+logger = zaplog.NewDynamic(currentFunc, zaplog.WithCtxAttrs(extractTrace))
 ```
 
 ### 契约测试（适配器作者）
