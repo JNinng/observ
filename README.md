@@ -91,6 +91,12 @@ logger := zaplog.New(zapLogger)         // 实现 observ.Logger（固定实例�
 logger = zaplog.NewDynamic(currentFunc, zaplog.WithCtxAttrs(extractTrace))
 ```
 
+zaplog 亦实现 `LoggerWithAttrs`（observ v0.4.0 能力接口）——构造期绑定属性，输出顺序"绑定 → 调用时 → ctx 提取"，派生 Logger 仍跟随动态实例：
+
+```go
+bound := logger.(observ.LoggerWithAttrs).WithAttrs(slog.String("component", "cache"))
+```
+
 ### 契约测试（适配器作者）
 
 ```go

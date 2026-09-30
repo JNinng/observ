@@ -20,6 +20,11 @@
 // 属性编码：slog.Attr 逐个显式转 zap Field，键名原样透传；
 // LogValuer 在编码前解析（对齐 slog handler 语义）；除 KindAny
 // 兜底外无反射；组属性以点号前缀展平，空名组内联。
+//
+// WithAttrs（observ.LoggerWithAttrs 可选能力）：构造期绑定属性，
+// 每次输出顺序为"绑定 → 调用时 → ctx 提取"；可叠加（先绑定者靠前），
+// 派生 Logger 保留动态实例跟随与 ctx 提取器，仍实现该能力接口；
+// 变参底层数组归实现所有（传参后拷贝绝缘）。
 package zaplog
 
 import (
@@ -64,6 +69,7 @@ func NewDynamic(current func() *zap.Logger, opts ...Option) observ.Logger {
 type logger struct {
 	current  func() *zap.Logger
 	ctxAttrs func(context.Context) []slog.Attr
+	bound    []slog.Attr // WithAttrs 绑定属性（前缀语义）
 }
 
 func mapLevel(l slog.Level) zapcore.Level {
@@ -83,13 +89,27 @@ func (l logger) Enabled(ctx context.Context, level slog.Level) bool {
 	return l.current().Core().Enabled(mapLevel(level))
 }
 
+// WithAttrs 绑定属性：每次 Log 输出顺序为"绑定 → 调用时 → ctx 提取"，
+// 可叠加（先绑定者靠前）。拷贝入参绝缘调用方修改（变参底层数组归实现
+// 所有）；派生 Logger 保留动态实例跟随与 ctx 提取器，仍实现
+// observ.LoggerWithAttrs。
+func (l logger) WithAttrs(attrs ...slog.Attr) observ.Logger {
+	bound := make([]slog.Attr, 0, len(l.bound)+len(attrs))
+	bound = append(bound, l.bound...)
+	bound = append(bound, attrs...)
+	return logger{current: l.current, ctxAttrs: l.ctxAttrs, bound: bound}
+}
+
 func (l logger) Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
 	zl := mapLevel(level)
 	inst := l.current()
 	if !inst.Core().Enabled(zl) {
 		return
 	}
-	fields := make([]zap.Field, 0, len(attrs))
+	fields := make([]zap.Field, 0, len(l.bound)+len(attrs))
+	for _, a := range l.bound {
+		fields = appendAttr(fields, a, "")
+	}
 	for _, a := range attrs {
 		fields = appendAttr(fields, a, "")
 	}

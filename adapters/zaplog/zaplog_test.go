@@ -78,6 +78,11 @@ func (l recLogger) Records() []contract.Record {
 	return out
 }
 
+// WithAttrs 转发并保留 Records() 读回，使 contract 能力档子测试可断言。
+func (l recLogger) WithAttrs(attrs ...slog.Attr) observ.Logger {
+	return recLogger{Logger: l.Logger.(observ.LoggerWithAttrs).WithAttrs(attrs...), core: l.core}
+}
+
 func unmapLevel(z zapcore.Level) slog.Level {
 	switch z {
 	case zapcore.DebugLevel:
@@ -270,5 +275,76 @@ func TestWithCtxAttrs(t *testing.T) {
 	recs = recLogger{Logger: l, core: core}.Records()
 	if len(recs[1].Attrs) != 0 {
 		t.Fatalf("plain record attrs = %v, want empty", recs[1].Attrs)
+	}
+}
+
+// TestZapWithAttrs：输出顺序为"绑定 → 调用时 → ctx 提取"；可叠加
+// （先绑定者靠前）；传参后修改调用方切片不影响输出（所有权）；派生
+// Logger 仍实现 observ.LoggerWithAttrs。
+func TestZapWithAttrs(t *testing.T) {
+	core := &recCore{min: zapcore.DebugLevel}
+	l := zaplog.NewDynamic(func() *zap.Logger { return zap.New(core) },
+		zaplog.WithCtxAttrs(func(context.Context) []slog.Attr {
+			return []slog.Attr{slog.String("trace_id", "t-1")}
+		}))
+	la, ok := l.(observ.LoggerWithAttrs)
+	if !ok {
+		t.Fatal("zaplog logger must implement observ.LoggerWithAttrs")
+	}
+	base := []slog.Attr{slog.String("component", "cache")}
+	bound := la.WithAttrs(base...)
+	base[0] = slog.String("component", "mutated") // 所有权：拷贝绝缘
+	stacked, ok := bound.(observ.LoggerWithAttrs)
+	if !ok {
+		t.Fatal("derived logger must preserve observ.LoggerWithAttrs")
+	}
+	bound = stacked.WithAttrs(slog.String("run_id", "r1"))
+
+	bound.Log(context.Background(), slog.LevelInfo, "m", slog.String("status", "ok"))
+
+	recs := recLogger{Logger: l, core: core}.Records()
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	want := []struct{ k, v string }{
+		{"component", "cache"}, // 绑定在前，未被调用方后续修改影响
+		{"run_id", "r1"},       // 叠加：后绑定靠后
+		{"status", "ok"},       // 调用时属性
+		{"trace_id", "t-1"},    // ctx 提取恒最后
+	}
+	got := recs[0].Attrs
+	if len(got) != len(want) {
+		t.Fatalf("attrs = %v, want %d fields", got, len(want))
+	}
+	for i, w := range want {
+		if got[i].Key != w.k || got[i].Value.String() != w.v {
+			t.Fatalf("attr[%d] = %q=%q, want %q=%q", i, got[i].Key, got[i].Value.String(), w.k, w.v)
+		}
+	}
+}
+
+// TestWithAttrsFollowsSwap：WithAttrs 派生 Logger 保留动态实例跟随——
+// 桥身份与能力均恒定，热更重建换新后自动跟随。
+func TestWithAttrsFollowsSwap(t *testing.T) {
+	coreA, coreB := &recCore{min: zapcore.DebugLevel}, &recCore{min: zapcore.DebugLevel}
+	cur := zap.New(coreA)
+	l := zaplog.NewDynamic(func() *zap.Logger { return cur })
+	bound := l.(observ.LoggerWithAttrs).WithAttrs(slog.String("component", "cache"))
+
+	bound.Log(context.Background(), slog.LevelInfo, "before", slog.String("k", "v"))
+	cur = zap.New(coreB) // 模拟热更重建：桥不换、实例换
+	bound.Log(context.Background(), slog.LevelInfo, "after")
+
+	ra := recLogger{Logger: l, core: coreA}.Records()
+	rb := recLogger{Logger: l, core: coreB}.Records()
+	if len(ra) != 1 || len(rb) != 1 {
+		t.Fatalf("records A/B = %d/%d, want 1/1", len(ra), len(rb))
+	}
+	if len(ra[0].Attrs) != 2 || ra[0].Attrs[0].Key != "component" || ra[0].Attrs[1].Key != "k" {
+		t.Fatalf("core A attrs = %v, want component 前缀于 k", ra[0].Attrs)
+	}
+	// "after" 无调用时属性,仅剩绑定属性——绑定不随实例重建丢失。
+	if len(rb[0].Attrs) != 1 || rb[0].Attrs[0].Key != "component" {
+		t.Fatalf("core B attrs = %v, want [component]", rb[0].Attrs)
 	}
 }

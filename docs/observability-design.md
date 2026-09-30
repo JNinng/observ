@@ -377,6 +377,10 @@ func New(zl *zap.Logger) observ.Logger
   snake_case 原样透传；`LogValuer` 在编码前解析（对齐 slog handler
   语义）；组属性以点号前缀展平，空名组内联；除 `KindAny` 兜底外
   无反射。
+- **WithAttrs**（observ v0.4.0 能力接口）：构造期绑定属性，输出
+  顺序"绑定 → 调用时 → ctx 提取"；可叠加（先绑定者靠前），派生
+  Logger 保留动态实例跟随与 ctx 提取器、仍实现该能力接口；拷贝
+  入参绝缘调用方修改（变参底层数组归实现所有）。
 - **存在理由**：zap 官方桥 `go.uber.org/zap/exp/zapslog` 位于实验性
   `exp/` 目录、无 API 稳定承诺，且方向是 slog.Handler 适配；zaplog
   直连 observ.Logger，由本仓库锁定语义、独立打 tag。
