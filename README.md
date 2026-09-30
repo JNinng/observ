@@ -8,6 +8,7 @@
 - **日志桥接**：`Logger` 接口仅 2 个方法，任意日志库直接实现即接入；slog 经根模块自带桥，zap 经 `adapters/zaplog`。
 - **指标小接口**：`Meter` 签名对齐 prometheus/otel 子集，根模块不提供聚合/导出实现。
 - **契约测试**：`contract` 包提供 `RunMeterContract` / `RunLoggerContract`，适配器实现一套测试即可验证并发安全与语义。
+- **可选能力接口**：Meter 产物可附加 WithCtx 记录变体（Exemplar/trace 关联；ctx 是信息载体，不是取消信号），Logger 可附加 WithAttrs（构造期属性绑定）；无能力时回落基础方法，接口演进非破坏。
 - **Noop 默认回落**：日志与指标均有包级默认（`DefaultLogger` / `DefaultMeter`，原子替换、初始 Noop、构造期快照），未注入选项时零输出、零开销。
 
 ## 安装
@@ -54,6 +55,24 @@ histogram.Observe(0.42)
 // 或设置包级默认（原子替换，业务库构造期读取一次并固定）
 old := observ.SetDefaultMeter(meter)
 defer observ.SetDefaultMeter(old)
+```
+
+### 可选能力接口
+
+能力在构造期断言一次并固定，热路径不重复断言；无能力时回落基础方法（记录不丢，仅丢 ctx 关联）：
+
+```go
+// Meter 产物携带 ctx 记录（供实现提取 Exemplar/trace 关联；ctx 不是取消信号）
+if cc, ok := counter.(observ.CounterWithCtx); ok {
+    cc.AddCtx(ctx, 1)
+} else {
+    counter.Add(1)
+}
+
+// Logger 构造期绑定属性：绑定在前、调用时属性在后，可叠加
+if la, ok := logger.(observ.LoggerWithAttrs); ok {
+    logger = la.WithAttrs(slog.String("component", "cache"))
+}
 ```
 
 ### 接入 Prometheus / zap

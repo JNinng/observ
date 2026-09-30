@@ -1,6 +1,9 @@
 package observ
 
-import "sync/atomic"
+import (
+	"context"
+	"sync/atomic"
+)
 
 // Meter 是指标侧统一小接口，签名刻意与 prometheus/otel 对齐。
 // 根模块不提供任何聚合/导出实现。
@@ -25,6 +28,29 @@ type Meter interface {
 	NewHistogram(name, help string, buckets []float64) Histogram
 }
 
+// 可选能力接口（设计文档 §8 演进机制：不改既有签名，实现方按需附加）。
+// XxxCtx 与同名方法语义一致，ctx 作为信息载体传给实现——实现从中提取
+// Exemplar/trace 关联；exemplar 内容（如 trace_id）由实现侧提取，接口
+// 不暴露 exemplar 参数。ctx 不是取消信号：已取消的 ctx 不得丢点。
+// 业务库在 New* 返回后（构造期）断言一次并固定，热路径不重复断言；
+// 产物无该能力时回落同名无 ctx 方法（记录不丢，仅丢 ctx 关联）。
+type CounterWithCtx interface {
+	Counter
+	IncCtx(ctx context.Context)
+	AddCtx(ctx context.Context, v float64)
+}
+
+type GaugeWithCtx interface {
+	Gauge
+	SetCtx(ctx context.Context, v float64)
+	AddCtx(ctx context.Context, v float64)
+}
+
+type HistogramWithCtx interface {
+	Histogram
+	ObserveCtx(ctx context.Context, v float64)
+}
+
 // noopMeter 是可比较的零大小值类型；NoopMeter 供业务库以
 // meter == observ.NoopMeter 整体跳过埋点代码块（best-effort 门控）。
 type noopMeter struct{}
@@ -37,17 +63,22 @@ func (noopMeter) NewHistogram(name, help string, b []float64) Histogram {
 
 type noopCounter struct{}
 
-func (noopCounter) Inc()          {}
-func (noopCounter) Add(v float64) {}
+func (noopCounter) Inc()                                  {}
+func (noopCounter) Add(v float64)                         {}
+func (noopCounter) IncCtx(ctx context.Context)            {}
+func (noopCounter) AddCtx(ctx context.Context, v float64) {}
 
 type noopGauge struct{}
 
-func (noopGauge) Set(v float64) {}
-func (noopGauge) Add(v float64) {}
+func (noopGauge) Set(v float64)                         {}
+func (noopGauge) Add(v float64)                         {}
+func (noopGauge) SetCtx(ctx context.Context, v float64) {}
+func (noopGauge) AddCtx(ctx context.Context, v float64) {}
 
 type noopHistogram struct{}
 
-func (noopHistogram) Observe(v float64) {}
+func (noopHistogram) Observe(v float64)                         {}
+func (noopHistogram) ObserveCtx(ctx context.Context, v float64) {}
 
 // NoopMeter 恒不 panic；重复 New* 恒正常返回。
 var NoopMeter Meter = noopMeter{}

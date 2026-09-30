@@ -15,12 +15,26 @@ type Logger interface {
 	Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr)
 }
 
+// LoggerWithAttrs 是 Logger 的可选能力接口（设计文档 §8 演进机制）：
+// 构造期绑定一组属性，此后每次 Log 的输出属性为"绑定在前、调用时
+// 属性在后"（对齐 slog Handler.WithAttrs 前缀语义），可叠加（先绑定者
+// 更靠前）。变参底层数组归实现所有（与 Log 所有权规则一致，调用方
+// 传参后不得修改）；实现宜保证返回值仍实现本接口（不强制，调用方
+// 按需再断言）。
+type LoggerWithAttrs interface {
+	Logger
+	WithAttrs(attrs ...slog.Attr) Logger
+}
+
 type noopLogger struct{}
 
 func (noopLogger) Enabled(context.Context, slog.Level) bool {
 	return false
 }
 func (noopLogger) Log(context.Context, slog.Level, string, ...slog.Attr) {}
+
+// WithAttrs 返回 NoopLogger 自身（绑定属性对 Noop 无意义）。
+func (noopLogger) WithAttrs(...slog.Attr) Logger { return NoopLogger }
 
 // NoopLogger 的 Enabled 恒 false，Log 为空操作（ctx 同样被忽略）。
 var NoopLogger Logger = noopLogger{}
@@ -40,6 +54,13 @@ func (s slogLogger) Log(ctx context.Context, level slog.Level, msg string, attrs
 		return
 	}
 	s.l.LogAttrs(ctx, level, msg, attrs...)
+}
+
+// WithAttrs 经 handler 派生（slog.Handler owns the slice——变参底层数组
+// 直接移交，所有权语义与本接口契约一致），避免走 Logger.With 的
+// ...any 装箱。返回值同样实现 LoggerWithAttrs。
+func (s slogLogger) WithAttrs(attrs ...slog.Attr) Logger {
+	return slogLogger{slog.New(s.l.Handler().WithAttrs(attrs))}
 }
 
 // defaultLogger 经 atomic.Pointer 读写，永不返回 nil，初始为 NoopLogger。

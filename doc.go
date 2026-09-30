@@ -19,4 +19,8 @@
 //  7. 核心包指标只有两种形态：无 label 指标、枚举拆名（枚举值入
 //     指标名）。带 label 指标只出现在用户侧预构建或业务库 adapter
 //     子包。
+//  8. 可选能力接口：产物与 Logger 的能力（Counter/Gauge/Histogram
+//     的 WithCtx 记录变体、LoggerWithAttrs）在业务库构造期断言一次
+//     并固定，热路径不重复断言；无能力时回落基础方法（记录不丢，
+//     仅丢 ctx 关联）。ctx 是信息载体不是取消信号。
 package observ

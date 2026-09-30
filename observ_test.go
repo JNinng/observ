@@ -155,7 +155,7 @@ func TestDefaultLoggerConcurrentSwap(t *testing.T) {
 }
 
 func TestSlogLoggerBridge(t *testing.T) {
-	h := &recSlogHandler{}
+	h := newRecSlogHandler()
 	sl := observ.NewSlogLogger(slog.New(h))
 	if !sl.Enabled(context.Background(), slog.LevelError) {
 		t.Fatal("slog bridge Enabled(Error) should be true for text-like handler")
@@ -163,24 +163,125 @@ func TestSlogLoggerBridge(t *testing.T) {
 	type ctxKey struct{}
 	ctx := context.WithValue(context.Background(), ctxKey{}, "v1")
 	sl.Log(ctx, slog.LevelWarn, "hello", slog.String("run_id", "r1"))
-	if len(h.recs) != 1 || h.recs[0].Level != slog.LevelWarn || h.recs[0].Message != "hello" {
-		t.Fatalf("unexpected records: %+v", h.recs)
+	if len(h.sink.recs) != 1 || h.sink.recs[0].Level != slog.LevelWarn || h.sink.recs[0].Message != "hello" {
+		t.Fatalf("unexpected records: %+v", h.sink.recs)
 	}
-	if got := h.ctxs[0].Value(ctxKey{}); got != "v1" {
+	if got := h.sink.ctxs[0].Value(ctxKey{}); got != "v1" {
 		t.Fatalf("slog bridge dropped caller ctx, got %v", got)
 	}
 }
 
+func TestNoopWithCtxCapabilities(t *testing.T) {
+	m := observ.NoopMeter
+	ctx := context.Background()
+
+	cc, ok := m.NewCounter("c_total", "h").(observ.CounterWithCtx)
+	if !ok {
+		t.Fatal("Noop counter must implement CounterWithCtx")
+	}
+	cc.IncCtx(ctx)
+	cc.AddCtx(ctx, 1)
+
+	gc, ok := m.NewGauge("g", "h").(observ.GaugeWithCtx)
+	if !ok {
+		t.Fatal("Noop gauge must implement GaugeWithCtx")
+	}
+	gc.SetCtx(ctx, 1)
+	gc.AddCtx(ctx, -1)
+
+	hc, ok := m.NewHistogram("h_seconds", "h", []float64{1}).(observ.HistogramWithCtx)
+	if !ok {
+		t.Fatal("Noop histogram must implement HistogramWithCtx")
+	}
+	hc.ObserveCtx(ctx, 0.5)
+
+	n := testing.AllocsPerRun(100, func() { cc.AddCtx(ctx, 1) })
+	if n != 0 {
+		t.Fatalf("NoopMeter counter AddCtx allocs = %v, want 0", n)
+	}
+}
+
+func TestNoopLoggerWithAttrs(t *testing.T) {
+	la, ok := observ.NoopLogger.(observ.LoggerWithAttrs)
+	if !ok {
+		t.Fatal("NoopLogger must implement LoggerWithAttrs")
+	}
+	if got := la.WithAttrs(slog.String("k", "v")); got != observ.NoopLogger {
+		t.Fatal("NoopLogger.WithAttrs must return NoopLogger")
+	}
+	la.WithAttrs().Log(context.Background(), slog.LevelError, "m") // 不得 panic
+}
+
+func TestSlogLoggerWithAttrs(t *testing.T) {
+	h := newRecSlogHandler()
+	sl := observ.NewSlogLogger(slog.New(h))
+	la, ok := sl.(observ.LoggerWithAttrs)
+	if !ok {
+		t.Fatal("slog bridge must implement LoggerWithAttrs")
+	}
+	bound := la.WithAttrs(slog.String("component", "cache"))
+	// 能力保留:派生 Logger 仍实现 LoggerWithAttrs,可叠加(先绑定者靠前)。
+	b2, ok := bound.(observ.LoggerWithAttrs)
+	if !ok {
+		t.Fatal("slog bridge WithAttrs must preserve capability")
+	}
+	base := []slog.Attr{slog.String("run_id", "r1")}
+	bound = b2.WithAttrs(base...)
+	// 所有权:传参后修改调用方切片,输出不受影响。
+	base[0] = slog.String("run_id", "mutated")
+
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "v1")
+	bound.Log(ctx, slog.LevelWarn, "hello", slog.String("status", "ok"))
+
+	if len(h.sink.recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(h.sink.recs))
+	}
+	var keys, vals []string
+	h.sink.recs[0].Attrs(func(a slog.Attr) bool {
+		keys = append(keys, a.Key)
+		vals = append(vals, a.Value.String())
+		return true
+	})
+	if len(keys) != 3 || keys[0] != "component" || keys[1] != "run_id" || keys[2] != "status" ||
+		vals[0] != "cache" || vals[1] != "r1" {
+		t.Fatalf("attr order = %v/%v, want component=cache, run_id=r1, status", keys, vals)
+	}
+	if got := h.sink.ctxs[0].Value(ctxKey{}); got != "v1" {
+		t.Fatalf("WithAttrs-derived logger dropped caller ctx, got %v", got)
+	}
+}
+
+// recSlogHandler 记录型 handler,模拟真实 handler 的 WithAttrs 前缀语义:
+// 绑定属性在记录属性之前;派生实例经 sink 共享记录。
 type recSlogHandler struct {
+	sink  *recSink
+	attrs []slog.Attr
+}
+
+type recSink struct {
 	recs []slog.Record
 	ctxs []context.Context
 }
 
-func (h *recSlogHandler) Enabled(ctx context.Context, l slog.Level) bool { return true }
+func newRecSlogHandler() *recSlogHandler { return &recSlogHandler{sink: &recSink{}} }
+
+func (h *recSlogHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
 func (h *recSlogHandler) Handle(ctx context.Context, r slog.Record) error {
-	h.recs = append(h.recs, r)
-	h.ctxs = append(h.ctxs, ctx)
+	nr := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	nr.AddAttrs(h.attrs...)
+	r.Attrs(func(a slog.Attr) bool { nr.AddAttrs(a); return true })
+	h.sink.recs = append(h.sink.recs, nr)
+	h.sink.ctxs = append(h.sink.ctxs, ctx)
 	return nil
 }
-func (h *recSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
-func (h *recSlogHandler) WithGroup(name string) slog.Handler       { return h }
+
+// WithAttrs 拷贝入参(所有权:调用方传参后的修改不影响输出)。
+func (h *recSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	next := append([]slog.Attr(nil), h.attrs...)
+	next = append(next, attrs...)
+	return &recSlogHandler{sink: h.sink, attrs: next}
+}
+
+func (h *recSlogHandler) WithGroup(string) slog.Handler { return h }

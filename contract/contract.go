@@ -10,6 +10,9 @@
 //   - 深度档（可选）：New* 返回值或被测 Logger 实现读回能力接口时
 //     自动启用，追加 golden 值、buckets 所有权、级别透传与 attrs
 //     内容断言。
+//   - 能力档（可选）：实现 WithCtx / LoggerWithAttrs 可选能力接口时
+//     自动启用，断言 ctx 非取消信号（已取消 ctx 不丢点）、XxxCtx
+//     与基础方法计入同一产物、绑定属性前缀顺序与所有权。
 package contract
 
 import (
@@ -146,6 +149,76 @@ func RunMeterContract(t *testing.T, new func() observ.Meter) {
 			}
 		}
 	})
+	t.Run("CtxCapability", func(t *testing.T) {
+		m := new()
+		// ctx 不是取消信号:已取消的 ctx 不得丢点;XxxCtx 与基础方法
+		// 计入同一产物(深度档经读回接口断言,基线档仅验证不 panic)。
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		c := m.NewCounter("contract_ctx_c_total", "h")
+		cc, cok := c.(observ.CounterWithCtx)
+		if cok {
+			cc.IncCtx(ctx)
+			cc.AddCtx(ctx, 2)
+			c.Add(1)
+			if cv, ok := c.(CounterValue); ok {
+				if got := cv.Value(); got != 4 {
+					t.Fatalf("counter Value = %v, want 4 (canceled ctx must not drop points)", got)
+				}
+			}
+		}
+
+		g := m.NewGauge("contract_ctx_g", "h")
+		gc, gok := g.(observ.GaugeWithCtx)
+		if gok {
+			gc.SetCtx(ctx, 3)
+			gc.AddCtx(ctx, -1)
+			if gv, ok := g.(GaugeValue); ok {
+				if got := gv.Value(); got != 2 {
+					t.Fatalf("gauge Value = %v, want 2", got)
+				}
+			}
+		}
+
+		hm := m.NewHistogram("contract_ctx_h_seconds", "h", []float64{1})
+		hc, hok := hm.(observ.HistogramWithCtx)
+		if hok {
+			hc.ObserveCtx(ctx, 0.5)
+			if hs, ok := hm.(HistogramStats); ok {
+				if got, want := hs.Count(), uint64(1); got != want {
+					t.Fatalf("hist Count = %v, want %v (canceled ctx must not drop points)", got, want)
+				}
+			}
+		}
+
+		if !cok && !gok && !hok {
+			t.Skip("无 WithCtx 能力接口，跳过")
+		}
+
+		// WithCtx 变体并发安全（-race）。
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 100; j++ {
+					if cok {
+						cc.IncCtx(ctx)
+						cc.AddCtx(ctx, 1)
+					}
+					if gok {
+						gc.SetCtx(ctx, 1)
+						gc.AddCtx(ctx, -1)
+					}
+					if hok {
+						hc.ObserveCtx(ctx, 0.1)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	})
 }
 
 // RunLoggerContract 对 new 产出的 Logger 运行契约测试。
@@ -198,6 +271,45 @@ func RunLoggerContract(t *testing.T, new func() observ.Logger) {
 				if after := len(lr.Records()); after != before {
 					t.Fatalf("Log at disabled level %v produced output", lvl)
 				}
+			}
+		}
+	})
+
+	t.Run("WithAttrs", func(t *testing.T) {
+		l := new()
+		la, ok := l.(observ.LoggerWithAttrs)
+		if !ok {
+			t.Skip("无 LoggerWithAttrs 能力接口，跳过")
+		}
+		base := []slog.Attr{slog.String("component", "cache")}
+		bound := la.WithAttrs(base...)
+		if bound == nil {
+			t.Fatal("WithAttrs 必须返回非 nil Logger")
+		}
+		// 所有权:传参后修改调用方切片,输出不受影响(同 §4.2 buckets
+		// 所有权先例,实现须自行绝缘)。
+		base[0] = slog.String("component", "mutated")
+		bound.Log(context.Background(), slog.LevelInfo, "m", slog.String("run_id", "r1"))
+
+		lr, ok := bound.(LoggerRecords)
+		if !ok {
+			return // 基线档:仅验证不 panic、返回可用 Logger。
+		}
+		recs := lr.Records()
+		if len(recs) != 1 {
+			t.Fatalf("records = %d, want 1", len(recs))
+		}
+		r := recs[0]
+		if len(r.Attrs) != 2 ||
+			r.Attrs[0].Key != "component" || r.Attrs[0].Value.String() != "cache" ||
+			r.Attrs[1].Key != "run_id" || r.Attrs[1].Value.String() != "r1" {
+			t.Fatalf("attrs = %+v, want 绑定属性前缀于调用时属性", r.Attrs)
+		}
+		// Enabled 门控语义保持:门控级别下零输出。
+		if !bound.Enabled(context.Background(), slog.LevelInfo) {
+			bound.Log(context.Background(), slog.LevelInfo, "gated")
+			if got := len(lr.Records()); got != 1 {
+				t.Fatalf("门控级别产出输出: %d records", got)
 			}
 		}
 	})

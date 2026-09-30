@@ -135,6 +135,39 @@ func SetDefaultMeter(m Meter) (old Meter) // 传 nil 等价重置为 Noop
   未注入 Meter 时回落到它（见 5.1）。
 - 根模块不提供任何聚合/导出实现——导出由适配器与用户侧负责。
 
+**可选能力接口（WithCtx，v0.4.0 起）**：不改既有签名（§8 冻结
+条款），按可选能力接口 + 类型断言演进（先例：§6 读回能力接口）：
+
+```go
+type CounterWithCtx interface {
+	Counter
+	IncCtx(ctx context.Context)
+	AddCtx(ctx context.Context, v float64)
+}
+type GaugeWithCtx interface {
+	Gauge
+	SetCtx(ctx context.Context, v float64)
+	AddCtx(ctx context.Context, v float64)
+}
+type HistogramWithCtx interface {
+	Histogram
+	ObserveCtx(ctx context.Context, v float64)
+}
+```
+
+- `XxxCtx` 与同名方法语义一致，ctx 作为信息载体传给实现——实现从中
+  提取 Exemplar/trace 关联（动机：Prometheus `ExemplarAdd`、OTel
+  记录 API 均依赖记录时 ctx）。**ctx 不是取消信号**：已取消的 ctx
+  不得丢点。
+- exemplar 内容（如 trace_id 标签）由实现侧从 ctx 提取，接口不暴露
+  exemplar 参数——记录方法保持无分配签名。
+- **能力解析时机（使用规范，不可测）**：业务库在 `New*` 返回后
+  （构造期）断言一次并固定，热路径不重复断言；产物无该能力时回落
+  同名无 ctx 方法（记录不丢，仅丢 ctx 关联）。
+- Noop 产物实现全部 WithCtx 变体（空方法体）——能力断言对 Noop
+  恒命中，`meter == observ.NoopMeter` 门控语义不受影响。
+- 契约测试：实现该能力接口时自动启用 CtxCapability 断言（§6）。
+
 Meter 契约（硬性，按"可测语义 / 使用规范"两类约束，契约测试
 按第 6 节基线/深度两档断言）：
 
@@ -221,6 +254,28 @@ Logger 契约（硬性；可测项由契约测试按基线/深度两档断言，
 zap 经 `adapters/zaplog` 直接实现 Logger（见 5.2）；其余任意日志库
 （zerolog、logrus、自研等）由用户实现这两个方法即接入，无需
 slog Handler，也无需 observ 新增适配器。
+
+**可选能力接口（LoggerWithAttrs，v0.4.0 起）**：构造期绑定一组
+属性，免逐条重复传递（动机：组件级公共属性如 `component`）：
+
+```go
+type LoggerWithAttrs interface {
+	Logger
+	WithAttrs(attrs ...slog.Attr) Logger
+}
+```
+
+- 前缀语义：此后每次 `Log` 的输出属性为"绑定在前、调用时属性在
+  后"（对齐 slog `Handler.WithAttrs`），可叠加（先绑定者更靠前）。
+- **所有权**：变参底层数组归实现所有（与 `Log` 所有权规则一致）；
+  实现须自行绝缘调用方传参后的修改（同 §4.2 buckets 所有权先例，
+  契约测试验证）。
+- 实现宜保证返回值仍实现本接口（Noop 与 slog 桥均如此），不强制，
+  调用方按需再断言。
+- `NoopLogger.WithAttrs` 返回 `NoopLogger`；`NewSlogLogger` 桥经
+  `Handler.WithAttrs` 派生（stdlib "Handler owns the slice" 与本
+  所有权规则一致，变参数组直接移交，避免 `Logger.With` 的
+  `...any` 装箱）。
 
 ## 5. 业务库接入规范（各库照此执行）
 
@@ -369,7 +424,7 @@ label 变体 API 的具体形态在 prom 适配器实施时定稿，根模块接
   import "testing" 为**明示取舍**：testing 属 stdlib，不破坏零第三方
   依赖；`_test.go` 无法跨 module 复用、`internal/` 跨 module
   不可见，故契约助手必须公开。鉴于 `Meter`/`Logger` 接口本身
-  **无读回能力**（接口上没有取值方法），契约测试分两档，避免
+  **无读回能力**（接口上没有取值方法），契约测试分三档，避免
   断言超出接口能力：
     - **基线档（全部实现必测）**：并发安全（`-race`）；同名重复
       `New*` 与负值 `Add` 的两结局断言（正常返回或 panic，见 4.2，
@@ -384,6 +439,12 @@ label 变体 API 的具体形态在 prom 适配器实施时定稿，根模块接
       Set/Observe 后的 Value/Count/Sum）、buckets 所有权（传入后
       修改调用方切片，观察结果与 Bounds 不受影响）、`Enabled`
       门控下零输出、级别透传与 attrs 内容。
+    - **能力档（可选，实现 WithCtx / LoggerWithAttrs 可选能力接口
+      后自动启用）**：ctx 非取消信号——已取消 ctx 下 `XxxCtx` 仍
+      计入（深度读回可用时断言数值，否则仅不 panic）；`XxxCtx`
+      与基础方法计入同一产物；WithCtx 变体并发安全（`-race`）；
+      WithAttrs 绑定属性前缀于调用时属性、所有权（传参后修改
+      调用方切片不影响输出）、`Enabled` 门控语义保持。
       `New*` 调用时机与 NoopMeter 门控属使用规范，不可测（见 4.2）。
       DefaultLogger / DefaultMeter 的原子替换、永不 nil、初始 Noop、
       构造期快照语义在根模块测试中直接断言（`-race`，含
@@ -420,13 +481,17 @@ label 变体 API 的具体形态在 prom 适配器实施时定稿，根模块接
   携带 ctx（对齐 `slog.Logger` 签名，破坏性变更），消费侧经装饰层从
   ctx 读 span 注入 `trace_id`/`span_id` 属性（如在 observ 边界包装
   装饰 Logger——go_template 的 otelc 组件即此形态），observ 自身不
-  import otel。
+  import otel。指标记录侧的 ctx 传播已由 §4.2 WithCtx 能力接口
+  （v0.4.0）补齐——Exemplar/trace 关联的接口通道由此打通，适配器
+  侧落地（如 prom 经 `ExemplarAdd`）待真实需求出现再做。
   **剩余负债（记录在案）**：事件方法（Observer）仍无 ctx 参数、事件
   结构无 span 关联字段。演进路径：届时扩展事件签名或引入带 ctx 的
   分发变体，可能构成各业务库的破坏性变更（走 major）。此为接受的取舍。
 - 根模块核心接口（`Meter`/`Counter`/`Gauge`/`Histogram`、
   `Logger`）视为冻结：v1 前的小版本演进一律走**可选能力接口/扩展
-  接口**——先例为 §6 读回能力接口，分发模式同 §5.1 类型断言；修改
+  接口**——先例为 §6 读回能力接口、§4.2 WithCtx 能力接口与
+  §4.4 LoggerWithAttrs（后两者 v0.4.0），分发模式同 §5.1 类型断言；
+  修改
   方法签名或语义属破坏性变更，v0.x 阶段以 minor 版本号表达（先例：
   v0.2.0 为 Logger 两方法加 ctx），v1 起走 major。不以未导出方法
   封锁接口——用户自行实现 Meter/Logger 是受支持的用法（见 5.3
