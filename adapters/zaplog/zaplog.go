@@ -22,14 +22,17 @@
 // 兜底外无反射；组属性以点号前缀展平，空名组内联。
 //
 // WithAttrs（observ.LoggerWithAttrs 可选能力）：构造期绑定属性，
-// 每次输出顺序为"绑定 → 调用时 → ctx 提取"；可叠加（先绑定者靠前），
-// 派生 Logger 保留动态实例跟随与 ctx 提取器，仍实现该能力接口；
-// 变参底层数组归实现所有（传参后拷贝绝缘）。
+// 每次输出顺序为"绑定 → 调用时 → ctx 提取"；绑定字段在 WithAttrs 时
+// 求值编码一次（对齐 zap.With 语义，LogValuer 随之固定），并按实例
+// 代际缓存派生实例——稳态高频调用零重复编码，热更换新后首次调用
+// 重派生，桥的跟随语义不变。可叠加（先绑定者靠前），派生 Logger
+// 仍实现该能力接口；变参底层数组归实现所有（传参后即编码，拷贝绝缘）。
 package zaplog
 
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/jninng/observ"
 	"go.uber.org/zap"
@@ -63,13 +66,21 @@ func NewDynamic(current func() *zap.Logger, opts ...Option) observ.Logger {
 	for _, o := range opts {
 		o(&c)
 	}
-	return logger{current: current, ctxAttrs: c.ctxAttrs}
+	return &logger{current: current, ctxAttrs: c.ctxAttrs}
 }
 
+// boundInst 是按实例代际缓存的派生结果。
+type boundInst struct {
+	inst *zap.Logger // 缓存键：派生来源实例
+	lg   *zap.Logger // inst.With(bound...) 派生实例
+}
+
+// logger 含 atomic 字段，以指针形态存入接口（禁止拷贝）。
 type logger struct {
 	current  func() *zap.Logger
 	ctxAttrs func(context.Context) []slog.Attr
-	bound    []slog.Attr // WithAttrs 绑定属性（前缀语义）
+	bound    []zap.Field               // WithAttrs 编码后的绑定字段（nil = 未绑定）
+	derived  atomic.Pointer[boundInst] // bound != nil 时的派生缓存
 }
 
 func mapLevel(l slog.Level) zapcore.Level {
@@ -85,31 +96,37 @@ func mapLevel(l slog.Level) zapcore.Level {
 	}
 }
 
-func (l logger) Enabled(ctx context.Context, level slog.Level) bool {
+func (l *logger) Enabled(ctx context.Context, level slog.Level) bool {
 	return l.current().Core().Enabled(mapLevel(level))
 }
 
 // WithAttrs 绑定属性：每次 Log 输出顺序为"绑定 → 调用时 → ctx 提取"，
-// 可叠加（先绑定者靠前）。拷贝入参绝缘调用方修改（变参底层数组归实现
-// 所有）；派生 Logger 保留动态实例跟随与 ctx 提取器，仍实现
-// observ.LoggerWithAttrs。
-func (l logger) WithAttrs(attrs ...slog.Attr) observ.Logger {
-	bound := make([]slog.Attr, 0, len(l.bound)+len(attrs))
+// 可叠加（先绑定者靠前）。绑定字段此刻求值编码一次（对齐 zap.With：
+// LogValuer 等在绑定点求值），入参切片随即不再被引用（变参底层数组
+// 归实现所有，调用方传参后的修改不影响输出）；派生 Logger 保留动态
+// 实例跟随与 ctx 提取器，仍实现 observ.LoggerWithAttrs。
+func (l *logger) WithAttrs(attrs ...slog.Attr) observ.Logger {
+	if len(attrs) == 0 {
+		return l
+	}
+	bound := make([]zap.Field, 0, len(l.bound)+len(attrs))
 	bound = append(bound, l.bound...)
-	bound = append(bound, attrs...)
-	return logger{current: l.current, ctxAttrs: l.ctxAttrs, bound: bound}
+	for _, a := range attrs {
+		bound = appendAttr(bound, a, "")
+	}
+	return &logger{current: l.current, ctxAttrs: l.ctxAttrs, bound: bound}
 }
 
-func (l logger) Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
+func (l *logger) Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
 	zl := mapLevel(level)
 	inst := l.current()
+	if l.bound != nil {
+		inst = l.derive(inst)
+	}
 	if !inst.Core().Enabled(zl) {
 		return
 	}
-	fields := make([]zap.Field, 0, len(l.bound)+len(attrs))
-	for _, a := range l.bound {
-		fields = appendAttr(fields, a, "")
-	}
+	fields := make([]zap.Field, 0, len(attrs))
 	for _, a := range attrs {
 		fields = appendAttr(fields, a, "")
 	}
@@ -121,6 +138,19 @@ func (l logger) Log(ctx context.Context, level slog.Level, msg string, attrs ...
 	if ce := inst.Check(zl, msg); ce != nil {
 		ce.Write(fields...)
 	}
+}
+
+// derive 返回绑定字段已焊接的派生实例，以实例指针为键缓存：命中路径
+// 一次原子读加指针比较，稳态高频调用零重复编码；热更换新后首次调用
+// miss 重派生。缓存持有旧实例引用使其存活、地址不可能被复用，指针
+// 比较无 ABA；并发 miss 各自派生等价结果，Store 丢写无害。
+func (l *logger) derive(inst *zap.Logger) *zap.Logger {
+	if d := l.derived.Load(); d != nil && d.inst == inst {
+		return d.lg
+	}
+	d := &boundInst{inst: inst, lg: inst.With(l.bound...)}
+	l.derived.Store(d)
+	return d.lg
 }
 
 func appendAttr(fields []zap.Field, a slog.Attr, prefix string) []zap.Field {

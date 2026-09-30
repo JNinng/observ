@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,8 +25,10 @@ type recCore struct {
 	min    zapcore.Level
 }
 
-func (c *recCore) Enabled(l zapcore.Level) bool             { return l >= c.min }
-func (c *recCore) With(fields []zapcore.Field) zapcore.Core { return c }
+func (c *recCore) Enabled(l zapcore.Level) bool { return l >= c.min }
+func (c *recCore) With(fields []zapcore.Field) zapcore.Core {
+	return &withCore{parent: c, with: fields}
+}
 func (c *recCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
 	if c.Enabled(e.Level) {
 		return ce.AddCore(e, c)
@@ -41,6 +44,34 @@ func (c *recCore) Write(e zapcore.Entry, fields []zapcore.Field) error {
 	return nil
 }
 func (c *recCore) Sync() error { return nil }
+
+// withCore 诚实模拟 zap 的 With 语义：携带上下文字段，写入时前缀于
+// 调用字段、汇入原 recCore 的记录（With 真实生效，测试不因此失真）。
+type withCore struct {
+	parent *recCore
+	with   []zapcore.Field
+}
+
+func (w *withCore) Enabled(l zapcore.Level) bool { return w.parent.Enabled(l) }
+func (w *withCore) With(fields []zapcore.Field) zapcore.Core {
+	next := make([]zapcore.Field, 0, len(w.with)+len(fields))
+	next = append(next, w.with...)
+	next = append(next, fields...)
+	return &withCore{parent: w.parent, with: next}
+}
+func (w *withCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if w.parent.Enabled(e.Level) {
+		return ce.AddCore(e, w)
+	}
+	return ce
+}
+func (w *withCore) Write(e zapcore.Entry, fields []zapcore.Field) error {
+	all := make([]zapcore.Field, 0, len(w.with)+len(fields))
+	all = append(all, w.with...)
+	all = append(all, fields...)
+	return w.parent.Write(e, all)
+}
+func (w *withCore) Sync() error { return w.parent.Sync() }
 
 type recLogger struct {
 	observ.Logger
@@ -346,5 +377,55 @@ func TestWithAttrsFollowsSwap(t *testing.T) {
 	// "after" 无调用时属性,仅剩绑定属性——绑定不随实例重建丢失。
 	if len(rb[0].Attrs) != 1 || rb[0].Attrs[0].Key != "component" {
 		t.Fatalf("core B attrs = %v, want [component]", rb[0].Attrs)
+	}
+}
+
+// TestWithAttrsConcurrentSwap：缓存派生下并发 Log 与反复换实例混合
+// （-race）——每条日志落在其 current() 快照实例上且绑定属性恒在,
+// 缓存命中/重派生路径均不丢点。
+func TestWithAttrsConcurrentSwap(t *testing.T) {
+	cores := [4]*recCore{}
+	for i := range cores {
+		cores[i] = &recCore{min: zapcore.DebugLevel}
+	}
+	var idx atomic.Int32
+	l := zaplog.NewDynamic(func() *zap.Logger { return zap.New(cores[idx.Load()]) })
+	bound := l.(observ.LoggerWithAttrs).WithAttrs(slog.String("component", "cache"))
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					bound.Log(context.Background(), slog.LevelInfo, "m", slog.Int64("i", 1))
+				}
+			}
+		}()
+	}
+	for i := 0; i < len(cores)-1; i++ {
+		idx.Store(int32(i + 1))
+		time.Sleep(2 * time.Millisecond)
+	}
+	close(done)
+	wg.Wait()
+
+	// 每个收到日志的 core:记录必含绑定属性 component 前缀于调用属性 i。
+	total := 0
+	for i, c := range cores {
+		for _, r := range (recLogger{Logger: l, core: c}).Records() {
+			total++
+			if len(r.Attrs) != 2 || r.Attrs[0].Key != "component" || r.Attrs[1].Key != "i" {
+				t.Fatalf("core %d record attrs = %v, want component 前缀于 i", i, r.Attrs)
+			}
+		}
+	}
+	if total == 0 {
+		t.Fatal("no records captured")
 	}
 }

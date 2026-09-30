@@ -380,7 +380,11 @@ func New(zl *zap.Logger) observ.Logger
 - **WithAttrs**（observ v0.4.0 能力接口）：构造期绑定属性，输出
   顺序"绑定 → 调用时 → ctx 提取"；可叠加（先绑定者靠前），派生
   Logger 保留动态实例跟随与 ctx 提取器、仍实现该能力接口；拷贝
-  入参绝缘调用方修改（变参底层数组归实现所有）。
+  入参绝缘调用方修改（变参底层数组归实现所有）。绑定字段在
+  WithAttrs 时求值编码一次（对齐 zap.With），并按实例代际缓存
+  派生实例（以 `current()` 返回的实例指针为键，命中即一次原子读）：
+  稳态高频调用零重复编码，热更换新后首次调用重派生，跟随语义不变；
+  缓存持有旧实例使其地址不可复用，指针比较无 ABA。
 - **存在理由**：zap 官方桥 `go.uber.org/zap/exp/zapslog` 位于实验性
   `exp/` 目录、无 API 稳定承诺，且方向是 slog.Handler 适配；zaplog
   直连 observ.Logger，由本仓库锁定语义、独立打 tag。
